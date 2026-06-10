@@ -3,6 +3,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include <algorithm>
 #include <cstdlib>
 #include <iostream>
 #include <limits>
@@ -61,6 +62,7 @@
 #include "net/socket/udp_server_socket.h"
 #include "net/ssl/ssl_config_service.h"
 #include "net/ssl/ssl_key_logger_impl.h"
+#include "third_party/boringssl/src/include/openssl/ssl.h"
 #include "net/third_party/quiche/src/quiche/quic/core/quic_versions.h"
 #include "net/tools/naive/naive_command_line.h"
 #include "net/tools/naive/naive_config.h"
@@ -252,6 +254,15 @@ std::unique_ptr<URLRequestContext> BuildURLRequestContext(
     struct NoPostQuantum : public SSLConfigService {
       SSLContextConfig GetSSLContextConfig() override {
         SSLContextConfig config;
+        // Remove post-quantum key exchange groups so that the ClientHello
+        // does not include the large X25519MLKEM768 key share, which can
+        // break on middleboxes that drop large handshake messages.
+        auto& groups = config.supported_named_groups;
+        groups.erase(std::remove_if(groups.begin(), groups.end(),
+          [](const SSLNamedGroupInfo& g) {
+            return g.group_id == SSL_GROUP_X25519_MLKEM768 ||
+                   g.group_id == SSL_GROUP_X25519_KYBER768_DRAFT00;
+          }), groups.end());
         return config;
       }
 

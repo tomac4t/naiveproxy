@@ -21,22 +21,30 @@ esac
 if [ "$host_os" = mac -a "$host_cpu" = arm64 ]; then
   WITH_CLANG=Mac_arm64
 fi
-mkdir -p third_party/llvm-build/Release+Asserts
+LLVM_BUILD_DIR=third_party/llvm-build/Release+Asserts
+mkdir -p "$LLVM_BUILD_DIR"
 cd tools/clang/scripts
 CLANG_REVISION=$($PYTHON -c 'import update; print(update.PACKAGE_VERSION)')
 cd -
-echo $CLANG_REVISION >third_party/llvm-build/Release+Asserts/cr_build_revision
-if [ ! -d third_party/llvm-build/Release+Asserts/bin ]; then
-  mkdir -p third_party/llvm-build/Release+Asserts
+# Guard against stale toolchain carry-over: only skip the download when the
+# installed clang actually matches the revision DEPS/update.py wants. Upstream
+# Chromium bumps CLANG_REVISION on every roll; a plain "bin/ exists?" check
+# would keep the old clang forever and later fail at compile time with
+# "unknown argument: -f..." because build/config assumes the new revision.
+installed_clang_revision=
+if [ -f "$LLVM_BUILD_DIR/cr_build_revision" ]; then
+  installed_clang_revision=$(cat "$LLVM_BUILD_DIR/cr_build_revision")
+fi
+if [ "$CLANG_REVISION" != "$installed_clang_revision" ] || [ ! -d "$LLVM_BUILD_DIR/bin" ]; then
+  echo "Clang toolchain stale or missing (want $CLANG_REVISION, have ${installed_clang_revision:-none}); refetching..."
+  rm -rf "$LLVM_BUILD_DIR"
+  mkdir -p "$LLVM_BUILD_DIR"
   clang_path="clang-$CLANG_REVISION.tar.xz"
   clang_url="https://commondatastorage.googleapis.com/chromium-browser-clang/$WITH_CLANG/$clang_path"
-  curl "$clang_url" | tar xJf - -C third_party/llvm-build/Release+Asserts
-  if [ "$target_os" = android ]; then
-    clang_path="clang-android-runtime-library-$CLANG_REVISION.tar.xz"
-    clang_url="https://commondatastorage.googleapis.com/chromium-browser-clang/$WITH_CLANG/$clang_path"
-    curl "$clang_url" | tar xJf - -C third_party/llvm-build/Release+Asserts
-  fi
+  curl "$clang_url" | tar xJf - -C "$LLVM_BUILD_DIR"
 fi
+# Record the revision only after a successful fetch/verify.
+echo "$CLANG_REVISION" >"$LLVM_BUILD_DIR/cr_build_revision"
 
 # sccache
 if [ "$host_os" = win -a ! -f ~/.cargo/bin/sccache.exe ]; then
@@ -55,12 +63,24 @@ esac
 if [ "$host_os" = mac -a "$host_cpu" = arm64 ]; then
   WITH_GN=mac-arm64
 fi
-if [ ! -f gn/out/gn ]; then
-  gn_version=$(grep "'gn_version':" DEPS | cut -d"'" -f4)
+gn_version=$(grep "'gn_version':" DEPS | cut -d"'" -f4)
+# Same stale-carry-over problem as clang: a bare "gn/out/gn exists?" check
+# pins whatever gn the tree happened to keep, even after an upstream Chromium
+# roll changes the DEPS gn_version. Record the fetched version and refetch on
+# mismatch (e.g. newer gn hard-errors on dead dotfile assignments like
+# expand_directory_allowlist -> "Assignment had no effect").
+installed_gn_version=
+if [ -f gn/out/gn_version ]; then
+  installed_gn_version=$(cat gn/out/gn_version)
+fi
+if [ ! -f gn/out/gn ] || [ "$gn_version" != "$installed_gn_version" ]; then
+  echo "gn stale or missing (want $gn_version, have ${installed_gn_version:-none}); refetching..."
+  rm -rf gn
   mkdir -p gn/out
   curl -L "https://chrome-infra-packages.appspot.com/dl/gn/gn/$WITH_GN/+/$gn_version" -o gn.zip
   unzip gn.zip -d gn/out
   rm gn.zip
+  echo "$gn_version" >gn/out/gn_version
 fi
 
 # See src/build/config/compiler/pgo/BUILD.gn
@@ -101,7 +121,8 @@ if [ "$WITH_PGO" -a ! -f chrome/build/pgo_profiles/"$PGO_PATH" ]; then
 fi
 
 if [ "$target_os" = android -a ! -d third_party/android_toolchain/ndk ]; then
-  android_ndk_version=r24
+  # https://dl.google.com/android/repository/android-ndk-r25c-linux.zip
+  android_ndk_version=$(grep 'default_android_ndk_version = ' build/config/android/config.gni | cut -d'"' -f2)
   curl -LO https://dl.google.com/android/repository/android-ndk-$android_ndk_version-linux.zip
   unzip android-ndk-$android_ndk_version-linux.zip
   mkdir -p third_party/android_toolchain/ndk
